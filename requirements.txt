@@ -1,0 +1,10 @@
+torch
+torchvision
+numpy
+scipy
+trimesh
+pillow
+matplotlib
+tqdm
+roma
+huggingface_hub
