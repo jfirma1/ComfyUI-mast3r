@@ -276,8 +276,9 @@ class Mast3rRun:
         # Adjust niter2 based on optim_level
         actual_niter2 = 0 if optim_level == 'coarse' else niter2
         
-        # Clear and prepare cache
-        cache_dir = os.path.join(CACHE_PATH, 'sparse_ga_cache')
+# Clear and prepare cache
+        # FIX: Append image_size to cache path to prevent dimension mismatch errors
+        cache_dir = os.path.join(CACHE_PATH, f'sparse_ga_cache_{image_size}')
         os.makedirs(cache_dir, exist_ok=True)
         
         # Run sparse global alignment
