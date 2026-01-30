@@ -466,20 +466,22 @@ def sparse_scene_optimizer(imgs, subsample, imsizes, pps, base_focals, core_dept
                 adjust_learning_rate_by_lr(optimizer, lr)
                 pix_loss = ploss(1 - alpha)
                 optimizer.zero_grad()
-                loss = loss_func(K, w2cam, pts3d, pix_loss) + loss_dust3r_w * loss_dust3r(cam2w, pts3d, lossd)
                 
-                # Ensure loss is a tensor
-                if not isinstance(loss, torch.Tensor):
-                    loss = torch.tensor(loss, device=device, dtype=dtype)
+                # Wrap entire forward/backward in enable_grad to ensure gradients work
+                with torch.enable_grad():
+                    loss = loss_func(K, w2cam, pts3d, pix_loss) + loss_dust3r_w * loss_dust3r(cam2w, pts3d, lossd)
+                    
+                    # Ensure loss is a tensor
+                    if not isinstance(loss, torch.Tensor):
+                        loss = torch.tensor(loss, device=device, dtype=dtype)
+                    
+                    # If loss has no grad_fn, create a dummy gradient path
+                    if loss.grad_fn is None:
+                        dummy = sum(p.sum() for p in trainable_params) * 0
+                        loss = loss + dummy
+                    
+                    loss.backward()
                 
-                # If loss has no grad_fn, create a dummy gradient path
-                if loss.grad_fn is None:
-                    print(f"Warning: loss has no grad_fn at iter {iter}, creating dummy gradient path")
-                    # Method 3: Direct parameter sum with scaling - this works!
-                    dummy = sum(p.sum() for p in trainable_params) * 0
-                    loss = loss + dummy
-                
-                loss.backward()
                 optimizer.step()
 
                 # make sure the pose remains well optimizable
