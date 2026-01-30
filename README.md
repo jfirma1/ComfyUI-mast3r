@@ -128,8 +128,10 @@ The scene graph determines how many pairs are calculated.
 | --- | --- |
 | **image_size** | **Crucial.** Controls memory usage and detail. Start at 512. |
 | **optim_level** | Controls the pipeline depth. `refine+depth` produces the highest quality meshes. |
-| **niter1** | **Global Alignment.** Increase if cameras are initialized in the wrong locations. |
-| **niter2** | **Refinement.** Increase to sharpen the mesh and reduce noise. |
+| **niter1** | **Global Alignment Iterations.** Increase if cameras are initialized in the wrong locations. |
+| **niter2** | **Refinement Iterations.** Increase to sharpen the mesh and reduce noise. |
+| **lr1** | **Stage 1 Learning Rate.** Controls how fast cameras move during alignment. Default `0.07`. |
+| **lr2** | **Stage 2 Learning Rate.** Controls refinement precision. Default `0.01`. |
 | **matching_conf_thr** | **Match Strictness (Default: 5.0).** Increase (>8.0) if you see "flying pixels" connecting unrelated objects. |
 | **min_conf_thr** | **Output Cleanup (Default: 1.5).** Points with confidence lower than this are deleted. Increase to 2.5+ for cleaner, sparser clouds. |
 | **TSDF_thresh** | **Mesh Smoothing (Default: 0.0).** If set to `0.01` - `0.05`, runs volume fusion to create a smooth, watertight mesh instead of a point cloud. |
