@@ -283,18 +283,20 @@ class Mast3rRun:
         # Run sparse global alignment
         print(f"MASt3R: Running sparse global alignment (niter1={niter1}, niter2={actual_niter2})")
         
-        # Ensure gradients are enabled for optimization
+# Ensure gradients are enabled for optimization and we are NOT in inference mode
         torch.set_grad_enabled(True)
         
-        scene = sparse_global_alignment(
-            filelist, pairs, cache_dir, model,
-            lr1=lr1, niter1=niter1, 
-            lr2=lr2, niter2=actual_niter2,
-            device=device,
-            opt_depth='depth' in optim_level,
-            shared_intrinsics=shared_intrinsics,
-            matching_conf_thr=matching_conf_thr
-        )
+        # FIX: Explicitly disable inference mode to allow gradient calculation
+        with torch.inference_mode(False):
+            scene = sparse_global_alignment(
+                filelist, pairs, cache_dir, model,
+                lr1=lr1, niter1=niter1, 
+                lr2=lr2, niter2=actual_niter2,
+                device=device,
+                opt_depth='depth' in optim_level,
+                shared_intrinsics=shared_intrinsics,
+                matching_conf_thr=matching_conf_thr
+            )
         
         # Generate 3D model output
         print("MASt3R: Generating 3D model output")
