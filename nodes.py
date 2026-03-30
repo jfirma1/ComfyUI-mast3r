@@ -1,59 +1,180 @@
+import copy
+import glob
 import os
 import sys
+import tempfile
+from typing import List, Optional
 
-# Setup paths before any other imports
+import numpy as np
+import torch
+from PIL import Image
+
+
 def setup_paths():
-    """Setup the Python path for mast3r imports"""
+    """Setup the Python path for mast3r imports."""
     try:
         import folder_paths
+
         comfy_path = os.path.dirname(folder_paths.__file__)
-        custom_nodes_path = os.path.join(comfy_path, 'custom_nodes', 'ComfyUI-mast3r')
+        custom_nodes_path = os.path.join(comfy_path, "custom_nodes", "ComfyUI-mast3r")
     except ImportError:
         # Fallback for testing outside ComfyUI
         custom_nodes_path = os.path.dirname(os.path.abspath(__file__))
-    
+
     if custom_nodes_path not in sys.path:
         sys.path.insert(0, custom_nodes_path)
-    
+
     return custom_nodes_path
+
 
 CUSTOM_NODES_PATH = setup_paths()
 
-from PIL import Image
-import torch
-import numpy as np
-import copy
+torch.backends.cuda.matmul.allow_tf32 = True  # for GPU >= Ampere and pytorch >= 1.12
 
-torch.backends.cuda.matmul.allow_tf32 = True  # for gpu >= Ampere and pytorch >= 1.12
-
-# Setup directories
-CHECKPOINTS_PATH = os.path.join(CUSTOM_NODES_PATH, 'checkpoints')
-INPUT_PATH = os.path.join(CUSTOM_NODES_PATH, 'input')
-OUTPUT_PATH = os.path.join(CUSTOM_NODES_PATH, 'output')
-CACHE_PATH = os.path.join(CUSTOM_NODES_PATH, 'cache')
+CHECKPOINTS_PATH = os.path.join(CUSTOM_NODES_PATH, "checkpoints")
+INPUT_PATH = os.path.join(CUSTOM_NODES_PATH, "input")
+OUTPUT_PATH = os.path.join(CUSTOM_NODES_PATH, "output")
+CACHE_PATH = os.path.join(CUSTOM_NODES_PATH, "cache")
 
 for path in [CHECKPOINTS_PATH, INPUT_PATH, OUTPUT_PATH, CACHE_PATH]:
     os.makedirs(path, exist_ok=True)
 
 
-def get_available_models():
-    """Get list of available model checkpoint files"""
+AUTO_RETRIEVAL_CHOICE = "Auto (first available)"
+NO_RETRIEVAL_CHOICE = "None"
+DEFAULT_MODEL = "MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth"
+DEFAULT_RETRIEVAL_MODEL = "MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_trainingfree.pth"
+
+
+try:
+    from mast3r.retrieval.processor import Retriever
+
+    HAS_RETRIEVAL = True
+    RETRIEVAL_IMPORT_ERROR = None
+except Exception as exc:  # pragma: no cover - environment dependent
+    Retriever = None
+    HAS_RETRIEVAL = False
+    RETRIEVAL_IMPORT_ERROR = exc
+
+
+def get_available_models() -> List[str]:
+    """Get list of available MASt3R reconstruction checkpoints, excluding retrieval checkpoints."""
     if os.path.exists(CHECKPOINTS_PATH):
-        models = [f for f in os.listdir(CHECKPOINTS_PATH) if f.endswith('.pth')]
+        models = sorted(
+            f
+            for f in os.listdir(CHECKPOINTS_PATH)
+            if f.endswith(".pth") and "_retrieval_" not in f
+        )
         if models:
             return models
-    return ["MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth"]
+    return [DEFAULT_MODEL]
 
 
-def convert_scene_to_glb(outfile, imgs, pts3d, mask, focals, cams2world, 
-                         cam_size=0.05, cam_color=None, as_pointcloud=False, 
-                         transparent_cams=False):
-    """Convert scene output to GLB file format"""
+
+def get_available_retrieval_models() -> List[str]:
+    """Get list of available MASt3R retrieval checkpoints."""
+    choices = [AUTO_RETRIEVAL_CHOICE, NO_RETRIEVAL_CHOICE]
+    if os.path.exists(CHECKPOINTS_PATH):
+        models = sorted(
+            f for f in os.listdir(CHECKPOINTS_PATH) if f.endswith("_retrieval_trainingfree.pth")
+        )
+        choices.extend(models)
+    elif DEFAULT_RETRIEVAL_MODEL not in choices:
+        choices.append(DEFAULT_RETRIEVAL_MODEL)
+    return choices
+
+
+
+def _resolve_path(candidate: str, base_dir: str) -> str:
+    if not candidate:
+        return ""
+    candidate = candidate.strip()
+    if not candidate:
+        return ""
+    if os.path.isabs(candidate):
+        return candidate
+    joined = os.path.join(base_dir, candidate)
+    if os.path.exists(joined):
+        return joined
+    return candidate
+
+
+
+def _derive_expected_codebook_path(trainingfree_path: str) -> Optional[str]:
+    filename = os.path.basename(trainingfree_path)
+    if filename.endswith("_trainingfree.pth"):
+        return os.path.join(
+            os.path.dirname(trainingfree_path),
+            filename.replace("_trainingfree.pth", "_codebook.pkl"),
+        )
+    return None
+
+
+
+def resolve_retrieval_model_path(retrieval_model_name: str, retrieval_model_path: str = "") -> Optional[str]:
+    """Resolve the retrieval checkpoint path, validating the expected trainingfree/codebook layout."""
+    manual_path = _resolve_path(retrieval_model_path, CHECKPOINTS_PATH)
+    selected_name = (retrieval_model_name or AUTO_RETRIEVAL_CHOICE).strip() or AUTO_RETRIEVAL_CHOICE
+
+    if manual_path:
+        selected_path = manual_path
+    elif selected_name == NO_RETRIEVAL_CHOICE:
+        return None
+    elif selected_name == AUTO_RETRIEVAL_CHOICE:
+        candidates = [
+            os.path.join(CHECKPOINTS_PATH, f)
+            for f in sorted(os.listdir(CHECKPOINTS_PATH))
+            if f.endswith("_retrieval_trainingfree.pth")
+        ] if os.path.isdir(CHECKPOINTS_PATH) else []
+        if not candidates:
+            raise FileNotFoundError(
+                "No retrieval checkpoint found. Download both files into the checkpoints folder:\n"
+                "- MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_trainingfree.pth\n"
+                "- MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_codebook.pkl"
+            )
+        selected_path = candidates[0]
+    else:
+        selected_path = _resolve_path(selected_name, CHECKPOINTS_PATH)
+
+    if selected_path.endswith(".pkl"):
+        raise ValueError(
+            "retrieval_model_path must point to the *_retrieval_trainingfree.pth file, not the codebook .pkl. "
+            "Keep the matching *_retrieval_codebook.pkl file in the same directory."
+        )
+
+    if not os.path.isfile(selected_path):
+        raise FileNotFoundError(f"Retrieval checkpoint not found: {selected_path}")
+
+    expected_codebook = _derive_expected_codebook_path(selected_path)
+    if expected_codebook and not os.path.isfile(expected_codebook):
+        raise FileNotFoundError(
+            "Retrieval codebook not found next to the trainingfree checkpoint. Expected:\n"
+            f"{expected_codebook}\n"
+            "Download the matching *_retrieval_codebook.pkl file and place it in the same folder."
+        )
+
+    return selected_path
+
+
+
+def convert_scene_to_glb(
+    outfile,
+    imgs,
+    pts3d,
+    mask,
+    focals,
+    cams2world,
+    cam_size=0.05,
+    cam_color=None,
+    as_pointcloud=False,
+    transparent_cams=False,
+):
+    """Convert scene output to GLB file format."""
     import trimesh
     from scipy.spatial.transform import Rotation
     from dust3r.utils.device import to_numpy
     from dust3r.viz import add_scene_cam, CAM_COLORS, OPENGL, pts3d_to_trimesh, cat_meshes
-    
+
     assert len(pts3d) == len(mask) <= len(imgs) <= len(cams2world) == len(focals)
     pts3d = to_numpy(pts3d)
     imgs = to_numpy(imgs)
@@ -82,29 +203,44 @@ def convert_scene_to_glb(outfile, imgs, pts3d, mask, focals, cams2world,
             camera_edge_color = cam_color[i]
         else:
             camera_edge_color = cam_color or CAM_COLORS[i % len(CAM_COLORS)]
-        add_scene_cam(scene, pose_c2w, camera_edge_color,
-                      None if transparent_cams else imgs[i], focals[i],
-                      imsize=imgs[i].shape[1::-1], screen_width=cam_size)
+        add_scene_cam(
+            scene,
+            pose_c2w,
+            camera_edge_color,
+            None if transparent_cams else imgs[i],
+            focals[i],
+            imsize=imgs[i].shape[1::-1],
+            screen_width=cam_size,
+        )
 
     rot = np.eye(4)
-    rot[:3, :3] = Rotation.from_euler('y', np.deg2rad(180)).as_matrix()
+    rot[:3, :3] = Rotation.from_euler("y", np.deg2rad(180)).as_matrix()
     scene.apply_transform(np.linalg.inv(cams2world[0] @ OPENGL @ rot))
-    print(f'(exporting 3D scene to {outfile})')
+    print(f"(exporting 3D scene to {outfile})")
     scene.export(file_obj=outfile)
     return outfile
 
 
-def get_3D_model_from_scene(outdir, scene, min_conf_thr=2, as_pointcloud=False, 
-                            mask_sky=False, clean_depth=False, transparent_cams=False, 
-                            cam_size=0.05, TSDF_thresh=0):
-    """Extract 3D model (glb file) from a reconstructed scene"""
+
+def get_3D_model_from_scene(
+    outdir,
+    scene,
+    min_conf_thr=2,
+    as_pointcloud=False,
+    mask_sky=False,
+    clean_depth=False,
+    transparent_cams=False,
+    cam_size=0.05,
+    TSDF_thresh=0,
+):
+    """Extract a 3D model (glb file) from a reconstructed scene."""
     from dust3r.utils.device import to_numpy
-    
+
     if scene is None:
         return None
-    
-    outfile = os.path.join(outdir, 'scene.glb')
-    
+
+    outfile = os.path.join(outdir, "scene.glb")
+
     rgbimg = scene.imgs
     focals = scene.get_focals().cpu()
     cams2world = scene.get_im_poses().cpu()
@@ -112,28 +248,37 @@ def get_3D_model_from_scene(outdir, scene, min_conf_thr=2, as_pointcloud=False,
     if TSDF_thresh > 0:
         try:
             from mast3r.cloud_opt.tsdf_optimizer import TSDFPostProcess
+
             tsdf = TSDFPostProcess(scene, TSDF_thresh=TSDF_thresh)
             pts3d, _, confs = to_numpy(tsdf.get_dense_pts3d(clean_depth=clean_depth))
-        except Exception as e:
-            print(f"TSDF processing failed: {e}, falling back to standard method")
+        except Exception as exc:
+            print(f"TSDF processing failed: {exc}, falling back to standard method")
             pts3d, _, confs = to_numpy(scene.get_dense_pts3d(clean_depth=clean_depth))
     else:
         pts3d, _, confs = to_numpy(scene.get_dense_pts3d(clean_depth=clean_depth))
-    
+
     msk = to_numpy([c > min_conf_thr for c in confs])
-    return convert_scene_to_glb(outfile, rgbimg, pts3d, msk, focals, cams2world, 
-                                as_pointcloud=as_pointcloud,
-                                transparent_cams=transparent_cams, cam_size=cam_size)
+    return convert_scene_to_glb(
+        outfile,
+        rgbimg,
+        pts3d,
+        msk,
+        focals,
+        cams2world,
+        as_pointcloud=as_pointcloud,
+        transparent_cams=transparent_cams,
+        cam_size=cam_size,
+    )
 
 
 class Mast3rLoader:
-    """Load a MASt3R model from checkpoint"""
-    
+    """Load a MASt3R model from checkpoint."""
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model_name": (get_available_models(), ),
+                "model_name": (get_available_models(),),
                 "device": (["cuda", "cpu"], {"default": "cuda"}),
             },
         }
@@ -145,23 +290,23 @@ class Mast3rLoader:
 
     def load(self, model_name, device):
         from mast3r.model import load_model
-        
+
         model_path = os.path.join(CHECKPOINTS_PATH, model_name)
         if not os.path.exists(model_path):
             raise FileNotFoundError(
                 f"Model not found at {model_path}.\n"
                 f"Please download the MASt3R model weights to: {CHECKPOINTS_PATH}\n"
-                f"Download from: https://download.europe.naverlabs.com/ComputerVision/MASt3R/"
+                "Download from: https://download.europe.naverlabs.com/ComputerVision/MASt3R/"
             )
-        
+
         print(f"Loading MASt3R model from {model_path}")
         model = load_model(model_path, device)
         return (model,)
 
 
 class Mast3rRun:
-    """Run MASt3R 3D reconstruction on input images"""
-    
+    """Run MASt3R 3D reconstruction on input images."""
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -173,10 +318,15 @@ class Mast3rRun:
                 "images": ("IMAGE",),
                 "image_folder_path": ("STRING", {"default": "", "multiline": False}),
                 "image_size": ("INT", {"default": 512, "min": 224, "max": 1024, "step": 32}),
-                "scenegraph_type": (["complete", "swin", "logwin", "oneref"], {"default": "complete"}),
-                "winsize": ("INT", {"default": 3, "min": 1, "max": 20, "step": 1}),
+                "scenegraph_type": (
+                    ["complete", "retrieval", "swin", "logwin", "oneref"],
+                    {"default": "complete"},
+                ),
+                "retrieval_model_name": (get_available_retrieval_models(), {"default": AUTO_RETRIEVAL_CHOICE}),
+                "retrieval_model_path": ("STRING", {"default": "", "multiline": False}),
+                "winsize": ("INT", {"default": 3, "min": 1, "max": 200, "step": 1}),
                 "win_cyclic": ("BOOLEAN", {"default": False}),
-                "refid": ("INT", {"default": 0, "min": 0, "max": 100, "step": 1}),
+                "refid": ("INT", {"default": 0, "min": 0, "max": 200, "step": 1}),
                 "optim_level": (["coarse", "refine", "refine+depth"], {"default": "refine+depth"}),
                 "lr1": ("FLOAT", {"default": 0.07, "min": 0.001, "max": 0.5, "step": 0.01}),
                 "niter1": ("INT", {"default": 300, "min": 0, "max": 2000, "step": 50}),
@@ -199,120 +349,190 @@ class Mast3rRun:
     FUNCTION = "run"
     CATEGORY = "MASt3R"
 
-    def run(self, model, device, image_size, scenegraph_type, winsize, win_cyclic, refid,
-            optim_level, lr1, niter1, lr2, niter2, min_conf_thr, matching_conf_thr, cam_size, 
-            TSDF_thresh, as_pointcloud, mask_sky, clean_depth, transparent_cams, shared_intrinsics,
-            images=None, image_folder_path=""):
-        
-        from mast3r.image_pairs import make_pairs
-        from mast3r.cloud_opt.sparse_ga import sparse_global_alignment
-        from dust3r.utils.image import load_images
-        import glob
-        
+    def _collect_filelist(self, images=None, image_folder_path=""):
         filelist = []
-        
-        # Check if we have a folder path
+
         if image_folder_path and image_folder_path.strip():
             folder_path = image_folder_path.strip()
             if os.path.isdir(folder_path):
-                # Get all image files from the folder
-                image_extensions = ['*.png', '*.jpg', '*.jpeg', '*.PNG', '*.JPG', '*.JPEG', '*.bmp', '*.BMP', '*.webp', '*.WEBP']
+                image_extensions = [
+                    "*.png",
+                    "*.jpg",
+                    "*.jpeg",
+                    "*.PNG",
+                    "*.JPG",
+                    "*.JPEG",
+                    "*.bmp",
+                    "*.BMP",
+                    "*.webp",
+                    "*.WEBP",
+                ]
                 for ext in image_extensions:
                     filelist.extend(glob.glob(os.path.join(folder_path, ext)))
-                filelist = sorted(filelist)  # Sort for consistent ordering
+                filelist = sorted(filelist)
                 print(f"MASt3R: Found {len(filelist)} images in folder: {folder_path}")
             elif os.path.isfile(folder_path):
-                # Single file path provided
                 filelist = [folder_path]
                 print(f"MASt3R: Using single image file: {folder_path}")
             else:
                 raise ValueError(f"Path does not exist: {folder_path}")
-        
-        # If no folder path or no files found, use the images input
+
         if not filelist and images is not None:
-            # Clear input folder
             for filename in os.listdir(INPUT_PATH):
                 file_path = os.path.join(INPUT_PATH, filename)
                 if os.path.isfile(file_path):
                     os.remove(file_path)
-            
-            # Save input images to disk
+
             for ind, image in enumerate(images):
                 image_np = 255.0 * image.cpu().numpy()
                 image_pil = Image.fromarray(np.clip(image_np, 0, 255).astype(np.uint8))
-                image_file = os.path.join(INPUT_PATH, f'{ind:04d}.png')
+                image_file = os.path.join(INPUT_PATH, f"{ind:04d}.png")
                 image_pil.save(image_file)
                 filelist.append(image_file)
             print(f"MASt3R: Saved {len(filelist)} images from input tensor")
-        
+
         if not filelist:
-            raise ValueError("No images provided. Please either connect images or provide an image_folder_path.")
-        
-        print(f"MASt3R: Processing {len(filelist)} images")
-        
-        # Load images using dust3r utility
-        imgs = load_images(filelist, size=image_size)
-        if len(imgs) == 1:
-            imgs = [imgs[0], copy.deepcopy(imgs[0])]
-            imgs[1]['idx'] = 1
-            filelist = [filelist[0], filelist[0] + '_copy']
-        
-        # Build scene graph parameters
+            raise ValueError(
+                "No images provided. Please either connect images or provide an image_folder_path."
+            )
+
+        return filelist
+
+    def _build_scene_graph(self, scenegraph_type, winsize, win_cyclic, refid):
         scene_graph_params = [scenegraph_type]
         if scenegraph_type in ["swin", "logwin"]:
             scene_graph_params.append(str(winsize))
-            if not win_cyclic:
-                scene_graph_params.append('noncyclic')
         elif scenegraph_type == "oneref":
             scene_graph_params.append(str(refid))
-        
-        scene_graph = '-'.join(scene_graph_params)
+        elif scenegraph_type == "retrieval":
+            scene_graph_params.append(str(winsize))  # Na = number of key images
+            scene_graph_params.append(str(refid))  # k = number of neighbors
+
+        if scenegraph_type in ["swin", "logwin"] and not win_cyclic:
+            scene_graph_params.append("noncyclic")
+
+        return "-".join(scene_graph_params)
+
+    def run(
+        self,
+        model,
+        device,
+        image_size,
+        scenegraph_type,
+        winsize,
+        win_cyclic,
+        refid,
+        optim_level,
+        lr1,
+        niter1,
+        lr2,
+        niter2,
+        min_conf_thr,
+        matching_conf_thr,
+        cam_size,
+        TSDF_thresh,
+        as_pointcloud,
+        mask_sky,
+        clean_depth,
+        transparent_cams,
+        shared_intrinsics,
+        images=None,
+        image_folder_path="",
+        retrieval_model_name=AUTO_RETRIEVAL_CHOICE,
+        retrieval_model_path="",
+    ):
+        from dust3r.utils.image import load_images
+        from mast3r.cloud_opt.sparse_ga import sparse_global_alignment
+        from mast3r.image_pairs import make_pairs
+
+        filelist = self._collect_filelist(images=images, image_folder_path=image_folder_path)
+        print(f"MASt3R: Processing {len(filelist)} images")
+
+        imgs = load_images(filelist, size=image_size)
+        if len(imgs) == 1:
+            imgs = [imgs[0], copy.deepcopy(imgs[0])]
+            imgs[1]["idx"] = 1
+            filelist = [filelist[0], filelist[0] + "_copy"]
+
+        scene_graph = self._build_scene_graph(scenegraph_type, winsize, win_cyclic, refid)
         print(f"MASt3R: Using scene graph: {scene_graph}")
-        
-        # Create image pairs
-        pairs = make_pairs(imgs, scene_graph=scene_graph, prefilter=None, symmetrize=True)
+
+        sim_matrix = None
+        if scenegraph_type == "retrieval":
+            if not HAS_RETRIEVAL:
+                raise RuntimeError(
+                    "Retrieval mode is unavailable because mast3r.retrieval.processor could not be imported. "
+                    "Install the retrieval dependencies (including ASMK) used by the upstream MASt3R demo. "
+                    f"Original import error: {RETRIEVAL_IMPORT_ERROR}"
+                )
+
+            if winsize <= 0:
+                raise ValueError("For retrieval mode, winsize must be >= 1 (number of key images).")
+            if refid <= 0:
+                raise ValueError("For retrieval mode, refid must be >= 1 (number of neighbors).")
+
+            retrieval_ckpt = resolve_retrieval_model_path(retrieval_model_name, retrieval_model_path)
+            print(f"MASt3R: Using retrieval checkpoint: {retrieval_ckpt}")
+            retriever = Retriever(retrieval_ckpt, backbone=model, device=device)
+            with torch.no_grad():
+                sim_matrix = retriever(filelist)
+            del retriever
+            if device == "cuda" and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        pairs = make_pairs(
+            imgs,
+            scene_graph=scene_graph,
+            prefilter=None,
+            symmetrize=True,
+            sim_mat=sim_matrix,
+        )
         print(f"MASt3R: Created {len(pairs)} image pairs")
-        
-        # Adjust niter2 based on optim_level
-        actual_niter2 = 0 if optim_level == 'coarse' else niter2
-        
-# Clear and prepare cache
-        # FIX: Append image_size to cache path to prevent dimension mismatch errors
-        cache_dir = os.path.join(CACHE_PATH, f'sparse_ga_cache_{image_size}')
-        os.makedirs(cache_dir, exist_ok=True)
-        
-        # Run sparse global alignment
-        print(f"MASt3R: Running sparse global alignment (niter1={niter1}, niter2={actual_niter2})")
-        
-# Ensure gradients are enabled for optimization and we are NOT in inference mode
+
+        actual_niter2 = 0 if optim_level == "coarse" else niter2
+        cache_dir = tempfile.mkdtemp(prefix=f"sparse_ga_{image_size}_", dir=CACHE_PATH)
+        print(f"MASt3R: Using fresh cache dir: {cache_dir}")
+        print(
+            f"MASt3R: Running sparse global alignment (niter1={niter1}, niter2={actual_niter2})"
+        )
+
         torch.set_grad_enabled(True)
-        
-        # FIX: Explicitly disable inference mode to allow gradient calculation
         with torch.inference_mode(False):
             scene = sparse_global_alignment(
-                filelist, pairs, cache_dir, model,
-                lr1=lr1, niter1=niter1, 
-                lr2=lr2, niter2=actual_niter2,
+                filelist,
+                pairs,
+                cache_dir,
+                model,
+                lr1=lr1,
+                niter1=niter1,
+                lr2=lr2,
+                niter2=actual_niter2,
                 device=device,
-                opt_depth='depth' in optim_level,
+                opt_depth="depth" in optim_level,
                 shared_intrinsics=shared_intrinsics,
-                matching_conf_thr=matching_conf_thr
+                matching_conf_thr=matching_conf_thr,
             )
-        
-        # Generate 3D model output
+
         print("MASt3R: Generating 3D model output")
         outfile = get_3D_model_from_scene(
-            OUTPUT_PATH, scene, min_conf_thr, as_pointcloud, mask_sky,
-            clean_depth, transparent_cams, cam_size, TSDF_thresh
+            OUTPUT_PATH,
+            scene,
+            min_conf_thr,
+            as_pointcloud,
+            mask_sky,
+            clean_depth,
+            transparent_cams,
+            cam_size,
+            TSDF_thresh,
         )
-        
+
         print(f"MASt3R: Output saved to {outfile}")
         return (outfile, scene)
 
 
 class Mast3rSceneToDepthMaps:
-    """Extract depth maps from a MASt3R scene"""
-    
+    """Extract depth maps from a MASt3R scene."""
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -328,29 +548,28 @@ class Mast3rSceneToDepthMaps:
 
     def extract(self, scene):
         from dust3r.utils.device import to_numpy
-        
+
         if scene is None:
             raise ValueError("No scene provided")
-        
+
         depthmaps = scene.get_depthmaps()
         depthmaps_np = to_numpy(depthmaps)
-        
-        # Normalize depth maps for visualization
-        depths_max = max([d.max() for d in depthmaps_np])
+
+        depths_max = max(d.max() for d in depthmaps_np)
         normalized_depths = []
-        
-        for d in depthmaps_np:
-            d_norm = d / depths_max
+
+        for depth in depthmaps_np:
+            d_norm = depth / depths_max
             d_rgb = np.stack([d_norm, d_norm, d_norm], axis=-1)
             normalized_depths.append(d_rgb)
-        
+
         depth_tensor = torch.from_numpy(np.stack(normalized_depths, axis=0)).float()
         return (depth_tensor,)
 
 
 class Mast3rSceneToPoses:
-    """Extract camera poses from a MASt3R scene"""
-    
+    """Extract camera poses from a MASt3R scene."""
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -366,13 +585,13 @@ class Mast3rSceneToPoses:
 
     def extract(self, scene):
         from dust3r.utils.device import to_numpy
-        
+
         if scene is None:
             raise ValueError("No scene provided")
-        
+
         cam2w = scene.get_im_poses()
         cam2w_np = to_numpy(cam2w)
-        
+
         poses = []
         for pose in cam2w_np:
             traj = [0, 0.474812461, 0.844111024, 0.5, 0.5, 1280, 720]
@@ -380,11 +599,10 @@ class Mast3rSceneToPoses:
             traj.extend(pose[1].tolist())
             traj.extend(pose[2].tolist())
             poses.append(traj)
-        
+
         return (poses,)
 
 
-# Node mappings for ComfyUI
 NODE_CLASS_MAPPINGS = {
     "Mast3rLoader": Mast3rLoader,
     "Mast3rRun": Mast3rRun,
