@@ -49,7 +49,7 @@ class Dust3rInputFromImageList(torch.utils.data.Dataset):
         return len(self.image_list)
 
     def __getitem__(self, index):
-        return load_images([self.image_list[index]], size=self.imsize, verbose=False)[0]
+        return load_images([self.image_list[index]], size=self.imsize)[0]
 
 
 class Whitener(nn.Module):
