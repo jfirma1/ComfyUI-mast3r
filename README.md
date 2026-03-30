@@ -335,7 +335,7 @@ More frames do not automatically mean more detail. Prefer fewer, better-spaced, 
 
 ## Optional RunPod Startup Script Addition (Retrieval Dependencies)
 
-If you use a startup script to restore dependencies on Pod launch, add a retrieval section after your pinned `numpy` / `scipy` installs:
+If you use a startup script to restore dependencies on Pod launch, add a retrieval section:
 
 ```bash
 # MAST3R RETRIEVAL DEPENDENCIES (faiss + ASMK)
