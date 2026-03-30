@@ -1,18 +1,28 @@
-
 # ComfyUI-MASt3R
 
-ComfyUI custom nodes for [MASt3R (Matching And Stereo 3D Reconstruction)](https://github.com/naver/mast3r) - a state-of-the-art 3D reconstruction model from Naver Corporation.
+ComfyUI custom nodes for [MASt3R (Matching And Stereo 3D Reconstruction)](https://github.com/naver/mast3r) — a 3D reconstruction model from Naver.
 
-MASt3R extends DUSt3R with dense local feature matching capabilities, providing significantly improved 3D reconstruction quality, especially for challenging scenes with repetitive patterns or complex geometry.
+This fork adds practical workflow improvements for ComfyUI use, including:
+
+- **MASt3R Model Loader** for the ViT-Large checkpoint
+- **MASt3R 3D Reconstruction** that outputs a `.glb`
+- **Scene to Depth Maps** export
+- **Scene to Camera Poses** export
+- **Retrieval scenegraph support** for larger image sets
+- **Fresh per-run cache directories** to reduce stale-cache write failures
 
 ![MASt3R](https://github.com/naver/mast3r/raw/main/assets/mast3r.jpg)
 
+---
+
 ## Features
 
-- **MASt3R Model Loader**: Loads the heavy ViT-Large model with efficient memory handling.
-- **MASt3R 3D Reconstruction**: The core node. Takes images, runs global alignment + local refinement, and outputs a `.glb` file.
-- **MASt3R Scene to Depth Maps**: Extracts high-quality depth maps from the reconstructed scene for use in other workflows (ControlNet, etc.).
-- **MASt3R Scene to Camera Poses**: Extracts estimated camera trajectories for animation or video production.
+- **MASt3R Model Loader**: Loads the checkpoint with practical memory handling for ComfyUI workflows.
+- **MASt3R 3D Reconstruction**: Runs sparse global alignment and exports a `.glb` scene.
+- **MASt3R Scene to Depth Maps**: Extracts depth maps from the reconstructed scene for downstream workflows.
+- **MASt3R Scene to Camera Poses**: Extracts camera trajectories for animation, previs, and layout work.
+- **Retrieval Mode**: Adds `scenegraph_type = retrieval`, with support for retrieval weights and codebook files.
+- **Safer Cache Behavior**: Uses a fresh sparse-GA cache directory per run instead of reusing one persistent cache folder.
 
 ---
 
@@ -20,35 +30,83 @@ MASt3R extends DUSt3R with dense local feature matching capabilities, providing 
 
 ### 1. Install the Nodes
 
-**Option A: Git Clone (Recommended)**
+**Option A: Git Clone**
+
 Navigate to your `ComfyUI/custom_nodes` folder and run:
+
 ```bash
-git clone [https://github.com/jfirma1/ComfyUI-mast3r.git](https://github.com/jfirma1/ComfyUI-mast3r.git)
+git clone https://github.com/jfirma1/ComfyUI-mast3r.git
 cd ComfyUI-mast3r
 pip install -r requirements.txt
-
 ```
 
 **Option B: Download ZIP**
 
 1. Download this repository as a ZIP file.
 2. Extract it into `ComfyUI/custom_nodes/ComfyUI-mast3r`.
-3. Open a terminal in that folder and run `pip install -r requirements.txt`.
-
-### 2. Download Model Weights
-
-You need the pre-trained MASt3R model weights. Download the file below and place it in the `ComfyUI-mast3r/checkpoints` folder.
-
-**Command Line:**
+3. Open a terminal in that folder and run:
 
 ```bash
-cd ComfyUI/custom_nodes/ComfyUI-mast3r/checkpoints
-wget [https://download.europe.naverlabs.com/ComputerVision/MASt3R/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth](https://download.europe.naverlabs.com/ComputerVision/MASt3R/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth)
-
+pip install -r requirements.txt
 ```
 
-**Manual Download:**
-[Click here to download MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth](https://download.europe.naverlabs.com/ComputerVision/MASt3R/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth)
+### 2. Download the Base MASt3R Checkpoint
+
+Place the checkpoint below in `ComfyUI/custom_nodes/ComfyUI-mast3r/checkpoints/`.
+
+```bash
+mkdir -p ComfyUI/custom_nodes/ComfyUI-mast3r/checkpoints
+cd ComfyUI/custom_nodes/ComfyUI-mast3r/checkpoints
+wget -O MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth \
+  https://download.europe.naverlabs.com/ComputerVision/MASt3R/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth
+```
+
+### 3. Optional: Enable Retrieval Mode
+
+Retrieval mode requires two additional files in the same `checkpoints/` folder:
+
+- `MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_trainingfree.pth`
+- `MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_codebook.pkl`
+
+Download them with:
+
+```bash
+mkdir -p /workspace/ComfyUI/custom_nodes/ComfyUI-mast3r/checkpoints && \
+wget -O /workspace/ComfyUI/custom_nodes/ComfyUI-mast3r/checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_trainingfree.pth \
+https://download.europe.naverlabs.com/ComputerVision/MASt3R/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_trainingfree.pth
+```
+
+```bash
+mkdir -p /workspace/ComfyUI/custom_nodes/ComfyUI-mast3r/checkpoints && \
+wget -O /workspace/ComfyUI/custom_nodes/ComfyUI-mast3r/checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_codebook.pkl \
+https://download.europe.naverlabs.com/ComputerVision/MASt3R/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_codebook.pkl
+```
+
+### 4. Optional: Retrieval Dependencies (`faiss-cpu` + ASMK)
+
+Retrieval mode also needs `faiss-cpu` and `asmk` installed.
+
+```bash
+python -m pip install -U pip setuptools wheel cython faiss-cpu
+cd /tmp
+rm -rf /tmp/asmk
+git clone --depth 1 https://github.com/jenicek/asmk /tmp/asmk
+cd /tmp/asmk/cython
+cythonize *.pyx
+cd /tmp/asmk
+python -m pip install --no-build-isolation .
+cd /
+python - <<'PY'
+import faiss
+import asmk
+from asmk import asmk_method
+print("faiss ok:", faiss.__file__)
+print("asmk ok:", asmk.__file__)
+print("asmk_method ok:", asmk_method.__file__)
+PY
+```
+
+> Important: run the final verification from outside `/tmp/asmk`, or Python may import the source tree instead of the installed package.
 
 ---
 
@@ -56,118 +114,284 @@ wget [https://download.europe.naverlabs.com/ComputerVision/MASt3R/MASt3R_ViTLarg
 
 ### Basic Workflow
 
-1. **Load Model**: Add the `MASt3R Model Loader` node.
-2. **Reconstruct**: Add the `MASt3R 3D Reconstruction` node.
-* Connect the model.
-* **Input Images**: You can either connect an image batch (from "Load Image") OR provide a folder path in `image_folder_path`.
-
-
-3. **Output**: The node saves a `scene.glb` to your output folder and returns the scene object for further processing (depth maps/poses).
+1. Add **MASt3R Model Loader**.
+2. Add **MASt3R 3D Reconstruction**.
+3. Connect the loaded model.
+4. Provide source images either by:
+   - connecting an image batch to the `images` input, or
+   - entering a folder in `image_folder_path`
+5. The node writes a `.glb` and returns the scene object for depth-map / camera-pose downstream nodes.
 
 ### Input Methods
 
-* **`images` (Input)**: Best for small batches or generating images inside ComfyUI.
-* **`image_folder_path` (String)**: Best for large datasets. Enter the absolute path to a folder containing your source images (PNG, JPG, BMP, WEBP).
+- **`images` input**: Best for smaller batches or images already inside ComfyUI.
+- **`image_folder_path`**: Best for larger datasets or extracted video frames.
+
+---
+
+## Scenegraph Modes
+
+The scenegraph controls how image pairs are built.
+
+### `complete`
+Matches every image with every other image.
+
+- Best for: small unordered image sets, object scans
+- Strongest connectivity
+- Most expensive in memory and compute
+
+### `swin`
+Sliding window matching.
+
+- Best for: sequential video frames, walkthroughs, turntables
+- More stable for long sequences
+- Much cheaper than `complete`
+
+### `logwin`
+Windowed matching with some longer-range links.
+
+- Best for: long indoor sequences where `swin` is too local but `complete` is too heavy
+- Often a good default for room scans
+
+### `oneref`
+Matches all images to one reference image.
+
+- Best for: star-pattern captures or explicit hero/reference-frame setups
+
+### `retrieval`
+Builds pairs from retrieval-selected key images and neighbors.
+
+- Best for: larger image sets where `complete` is too expensive
+- Requires the retrieval model, codebook, `faiss-cpu`, and `asmk`
+- In this node:
+  - `winsize` = number of key images
+  - `refid` = number of neighbors
 
 ---
 
 ## Recommended Settings
 
-MASt3R's memory usage explodes based on two factors: **Image Resolution** and **Scene Graph Type**.
+## Quick Practical Rules
 
-> **⚠️ CRITICAL WARNING:** Do not use `image_size: 1024` with `scenegraph_type: complete` if you have more than 10-12 images. You **will** run out of memory.
+- Start with **`image_size = 512` or `768`**.
+- Use **`complete`** only for smaller curated image sets.
+- Use **`logwin`**, **`swin`**, or **`retrieval`** for longer sequences.
+- For one camera / one lens / one phone clip, set **`shared_intrinsics = True`**.
+- While tuning, keep **`as_pointcloud = True`**. Mesh export is less forgiving.
 
-### 1. Safe Settings Guide (By GPU VRAM)
+### Preset A — Indoor Room Walkthrough (40–80 frames)
 
-| GPU VRAM | Safe Image Size | Safe Image Count (`complete`) | Safe Image Count (`swin`) |
-| --- | --- | --- | --- |
-| **12GB - 16GB** | 224 - 512 | < 5 images | < 15 images |
-| **24GB** (3090/4090) | 512 | 8 - 12 images | 30+ images |
-| **48GB** (A40/A6000) | **512 - 768** | **20 - 30 images** | **100+ images** |
-| **48GB** (A40/A6000) | **1024** | **< 10 images** | **40+ images** |
-| **80GB+** (A100/H100) | 1024 | 20+ images | 100+ images |
+```text
+image_size = 768
+scenegraph_type = retrieval
+winsize = 12 to 20
+refid = 6 to 10
+optim_level = refine+depth
+lr1 = 0.05
+niter1 = 500
+lr2 = 0.005
+niter2 = 500
+matching_conf_thr = 1.0 to 2.0
+min_conf_thr = 1.0 to 1.5
+shared_intrinsics = True
+as_pointcloud = True
+TSDF_thresh = 0.0
+clean_depth = True
+```
 
-### 2. Choosing Your Resolution
+### Preset B — Long Video Sequence Without Retrieval
 
-* **512 (Recommended)**: The sweet spot. Good geometry, stable memory usage. Use this for datasets with 20+ images.
-* **768 (High Quality)**: Use this if you have a powerful GPU (24GB+) and fewer than 15 images.
-* **1024 (Maximum)**: Only use this for **very small object scans** (<10 images) or **video sequences** using the `swin` graph.
+```text
+image_size = 768
+scenegraph_type = logwin
+winsize = 4 to 6
+optim_level = refine+depth
+lr1 = 0.05
+niter1 = 500
+lr2 = 0.005
+niter2 = 500
+matching_conf_thr = 1.0 to 2.0
+min_conf_thr = 1.2 to 1.8
+shared_intrinsics = True
+as_pointcloud = True
+TSDF_thresh = 0.0
+clean_depth = True
+```
 
-### 3. Scene Graph Types
+### Preset C — Small High-Quality Curated Set (12–24 images)
 
-The scene graph determines how many pairs are calculated.
+```text
+image_size = 768 or 1024
+scenegraph_type = complete
+optim_level = refine+depth
+lr1 = 0.04 to 0.05
+niter1 = 500 to 600
+lr2 = 0.004 to 0.005
+niter2 = 500 to 600
+matching_conf_thr = 1.0 to 2.0
+min_conf_thr = 1.2 to 1.8
+shared_intrinsics = True if all images come from the same camera/lens
+as_pointcloud = True during tuning
+```
 
-* **`complete` (Heavy)**: Matches *every* image to *every* other image ( pairs).
-* **Use for:** Unordered collections, object scans.
-* **Limit:** Keep under 20 images on 48GB VRAM (at 512px).
+### VRAM / Scaling Guidance
 
+| GPU VRAM | Safer Starting Point |
+| --- | --- |
+| 12–16 GB | 224–512 px, avoid `complete` on bigger sets |
+| 24 GB | 512 px stable, 768 px for smaller sets |
+| 48 GB | 512–768 px practical for many workflows |
+| 80 GB+ | More room for 1024 px experiments and denser graphs |
 
-* **`swin` (Efficient)**: Matches images in a sliding window (e.g., Frame 1 matches 2, 3, 4).
-* **Use for:** Video sequences, turntables.
-* **Benefit:** Memory usage is linear. You can process 100+ images easily.
-
-
-* **`oneref`**: Matches all images to a single reference image (defined by `refid`).
-* **Use for:** Star-pattern camera arrays or specific "hero shot" setups.
-
-
-
-### 4. Optimization Presets
-
-| Preset Goal | Optim Level | Niter1 | Niter2 | Notes |
-| --- | --- | --- | --- | --- |
-| **Fast Preview** | `coarse` | 100 | 0 | Checks camera positions only. |
-| **Standard** | `refine` | 300 | 200 | Good balance for most scenes. |
-| **High Quality** | `refine+depth` | 500 | 300 | **Best for meshes.** Optimizes geometry and depth maps. |
+> Warning: `complete` scales quadratically with image count. Do not use `1024 + complete` on large image sets unless you know your memory budget can handle it.
 
 ---
 
 ## Parameter Guide
 
-| Parameter | Description |
+| Parameter | What it really does |
 | --- | --- |
-| **image_size** | **Crucial.** Controls memory usage and detail. Start at 512. |
-| **optim_level** | Controls the pipeline depth. `refine+depth` produces the highest quality meshes. |
-| **niter1** | **Global Alignment Iterations.** Increase if cameras are initialized in the wrong locations. |
-| **niter2** | **Refinement Iterations.** Increase to sharpen the mesh and reduce noise. |
-| **lr1** | **Stage 1 Learning Rate.** Controls how fast cameras move during alignment. Default `0.07`. |
-| **lr2** | **Stage 2 Learning Rate.** Controls refinement precision. Default `0.01`. |
-| **matching_conf_thr** | **Match Strictness (Default: 5.0).** Increase (>8.0) if you see "flying pixels" connecting unrelated objects. |
-| **min_conf_thr** | **Output Cleanup (Default: 1.5).** Points with confidence lower than this are deleted. Increase to 2.5+ for cleaner, sparser clouds. |
-| **TSDF_thresh** | **Mesh Smoothing (Default: 0.0).** If set to `0.01` - `0.05`, runs volume fusion to create a smooth, watertight mesh instead of a point cloud. |
-| **mask_sky** | Set to `True` for outdoor scenes to automatically remove the sky dome (infinite depth points). |
-| **shared_intrinsics** | Set to `True` if all images come from the exact same camera/lens at the same focal length. Improves stability. |
-| **cam_size** | Controls the visual size of the camera frustums in the output GLB file. |
+| **image_size** | Primary quality / memory tradeoff. Start at `512` or `768`. |
+| **scenegraph_type** | Controls pair construction strategy: `complete`, `swin`, `logwin`, `oneref`, or `retrieval`. |
+| **winsize** | For `swin` / `logwin`: window size. For `retrieval`: number of key images. |
+| **refid** | For `oneref`: reference image index. For `retrieval`: number of neighbors. |
+| **optim_level** | `coarse`, `refine`, or `refine+depth`. `refine+depth` is the best quality preset. |
+| **niter1** | Stage 1 / alignment iterations. Increase if camera layout is unstable. |
+| **niter2** | Stage 2 / refinement iterations. Increase for slower, tighter convergence. |
+| **lr1** | Stage 1 learning rate. Lower it slightly if camera solves feel unstable. |
+| **lr2** | Stage 2 learning rate. Lower values can help refine more gently. |
+| **matching_conf_thr** | Match strictness during alignment. Raise it if you get spurious floaters or bad long-range connections. |
+| **min_conf_thr** | Export cleanup threshold. Higher values make the GLB cleaner but sparser. Lower values recover more detail but also more noise. |
+| **TSDF_thresh** | Optional TSDF cleanup during export. Keep at `0.0` while solving; try small values later only if the solve is already good. |
+| **as_pointcloud** | Recommended `True` while tuning. Point clouds reveal the real solve more honestly than mesh export. |
+| **clean_depth** | Helpful cleanup for exported dense depth. Usually leave enabled. |
+| **mask_sky** | Use for outdoor captures to avoid huge sky shells. |
+| **shared_intrinsics** | Set `True` for one camera / one lens / one zoom setting. |
+| **cam_size** | Visual size of the camera frustums in the GLB preview. |
+| **retrieval_model_name** | Retrieval checkpoint selector. Leave on Auto unless you need to force a specific file. |
+| **retrieval_model_path** | Optional manual override path to the `*_retrieval_trainingfree.pth` file. |
 
-## Tips for Success
+---
 
-1. **Memory Management**: If you crash with an OOM (Out Of Memory) error, the first thing you should do is **lower `image_size**`. The second thing is to switch from `complete` to `swin` graph.
-2. **Outdoor Scenes**: Always enable `mask_sky` for outdoor photos, or you will get a giant sphere of points surrounding your scene.
-3. **Clean Meshes**: For a clean, usable 3D mesh (not just points), set `as_pointcloud` to `False` and `TSDF_thresh` to roughly `0.02`.
-4. **Video Inputs**: If processing a video frame sequence, always use `scenegraph_type: swin` with a `winsize` of 3-5.
+## Practical Notes About the GLB Output
+
+The `.glb` preview is useful, but it is not the same thing as a final production mesh pipeline.
+
+- A valid `.glb` can still contain poor geometry if the solve is weak.
+- A "melted" room usually means the reconstruction or export thresholds are off, not that the file container is corrupted.
+- A very sparse result usually means export thresholds are too aggressive.
+
+Good rule of thumb:
+
+1. First get a believable **point cloud**.
+2. Then try mesh export.
+3. Only then experiment with mild `TSDF_thresh` values.
+
+---
+
+## Troubleshooting
+
+### `PytorchStreamWriter failed writing file data/0`
+
+This is usually a cache / disk write failure, not a MASt3R math failure.
+
+Try:
+
+```bash
+rm -rf /workspace/ComfyUI/custom_nodes/ComfyUI-mast3r/cache/*
+rm -f /workspace/ComfyUI/custom_nodes/ComfyUI-mast3r/input/extracted_frame_*.jpg
+```
+
+Then check free space:
+
+```bash
+df -h /workspace
+du -sh /workspace/ComfyUI/custom_nodes/ComfyUI-mast3r/cache
+```
+
+### Retrieval mode import errors
+
+If retrieval fails with `faiss` / `asmk` import errors, reinstall the retrieval dependencies and verify imports from outside `/tmp/asmk`.
+
+### GLB looks melted or folded
+
+- keep `as_pointcloud = True`
+- raise `matching_conf_thr` a bit
+- keep `TSDF_thresh = 0.0`
+- avoid overly aggressive graph settings on long sequences
+
+### GLB is too sparse
+
+- lower `min_conf_thr`
+- keep `TSDF_thresh = 0.0`
+- try `image_size = 768`
+- use stronger graph connectivity (`logwin` or `retrieval`) instead of making export pruning harsher
+
+### Too many images, not enough detail
+
+More frames do not automatically mean more detail. Prefer fewer, better-spaced, more diverse frames over many nearly identical adjacent frames.
+
+---
+
+## Optional RunPod Startup Script Addition (Retrieval Dependencies)
+
+If you use a startup script to restore dependencies on Pod launch, add a retrieval section after your pinned `numpy` / `scipy` installs:
+
+```bash
+# MAST3R RETRIEVAL DEPENDENCIES (faiss + ASMK)
+python -m pip install --break-system-packages --no-cache-dir -q \
+    pip setuptools wheel cython faiss-cpu
+
+cd /tmp
+rm -rf /tmp/asmk
+git clone --depth 1 https://github.com/jenicek/asmk /tmp/asmk
+cd /tmp/asmk/cython
+cythonize *.pyx
+cd /tmp/asmk
+python -m pip install --break-system-packages --no-build-isolation --no-cache-dir .
+
+cd /
+python - <<'PY'
+import faiss
+import asmk
+from asmk import asmk_method
+print("faiss ok:", faiss.__file__)
+print("asmk ok:", asmk.__file__)
+print("asmk_method ok:", asmk_method.__file__)
+PY
+```
+
+---
 
 ## Requirements
 
-* PyTorch
-* scipy
-* trimesh
-* roma
-* PIL/Pillow
-* numpy
+- PyTorch
+- scipy
+- trimesh
+- roma
+- Pillow
+- numpy
+- `faiss-cpu` and `asmk` for retrieval mode
+
+---
 
 ## Credits
 
-* [MASt3R](https://github.com/naver/mast3r) by Naver Corporation
-* [DUSt3R](https://github.com/naver/dust3r) by Naver Corporation
-* [CroCo](https://github.com/naver/croco) by Naver Corporation
+- [MASt3R](https://github.com/naver/mast3r) by Naver Corporation
+- [DUSt3R](https://github.com/naver/dust3r) by Naver Corporation
+- [CroCo](https://github.com/naver/croco) by Naver Corporation
+
+---
 
 ## License
 
 This project includes code from MASt3R, DUSt3R, and CroCo which are licensed under [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/) (non-commercial use only).
 
+---
+
 ## Citation
 
-If you use this in your research, please cite the original papers:
+If you use this in research, please cite the original papers:
 
 ```bibtex
 @inproceedings{mast3r_arxiv24,
@@ -183,9 +407,4 @@ If you use this in your research, please cite the original papers:
     booktitle = {CVPR},
     year = {2024}
 }
-
-```
-
-```
-
 ```
